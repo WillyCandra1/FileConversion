@@ -18,10 +18,11 @@ except ImportError:
     sys.exit(1)
 
 # pdf2docx is optional — only required when converting to DOCX
+# Use importlib to detect availability without importing the package
 try:
-    import pdf2docx as _pdf2docx_check  # noqa: F401
-    _HAS_PDF2DOCX = True
-except ImportError:
+    import importlib.util
+    _HAS_PDF2DOCX = importlib.util.find_spec("pdf2docx") is not None
+except Exception:
     _HAS_PDF2DOCX = False
 
 
