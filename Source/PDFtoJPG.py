@@ -17,10 +17,15 @@ except ImportError:
     sys.stderr.write("Error: Pillow not installed.  pip install Pillow\n")
     sys.exit(1)
 
+# pdf2docx is optional — only required when converting to DOCX
+try:
+    import pdf2docx as _pdf2docx_check  # noqa: F401
+    _HAS_PDF2DOCX = True
+except ImportError:
+    _HAS_PDF2DOCX = False
 
-# --------------------
+
 # Configuration
-# --------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,9 +45,7 @@ class PDFConversionError(Exception):
     """Raised when a PDF cannot be converted."""
 
 
-# ---------------------
 # File picker (GUI)
-# ---------------------
 
 def pick_pdf_files() -> list[Path]:
     """Open a native file-picker dialog. Returns [] if the user cancels."""
@@ -63,6 +66,46 @@ def pick_pdf_files() -> list[Path]:
     )
     root.destroy()
     return [Path(p) for p in selected]
+
+
+def pick_conversion_format() -> str | None:
+    """Show a dialog to pick output format. Returns 'jpg', 'docx', or None if cancelled."""
+    try:
+        import tkinter as tk
+    except ImportError:
+        return "jpg"
+
+    result: list[str | None] = [None]
+
+    root = tk.Tk()
+    root.title("Select Output Format")
+    root.attributes("-topmost", True)
+    root.resizable(False, False)
+
+    root.update_idletasks()
+    w, h = 320, 130
+    x = (root.winfo_screenwidth() - w) // 2
+    y = (root.winfo_screenheight() - h) // 2
+    root.geometry(f"{w}x{h}+{x}+{y}")
+
+    tk.Label(root, text="Select output format:", font=("", 11), pady=12).pack()
+
+    btn_frame = tk.Frame(root)
+    btn_frame.pack()
+
+    def choose(fmt: str) -> None:
+        result[0] = fmt
+        root.destroy()
+
+    tk.Button(btn_frame, text="JPG Images", width=13,
+              command=lambda: choose("jpg")).pack(side=tk.LEFT, padx=12)
+    tk.Button(btn_frame, text="DOCX Document", width=15,
+              command=lambda: choose("docx")).pack(side=tk.LEFT, padx=12)
+
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    root.mainloop()
+
+    return result[0]
 
 
 def pick_output_dir(initial_dir: Path | None = None) -> Path | None:
@@ -86,9 +129,7 @@ def pick_output_dir(initial_dir: Path | None = None) -> Path | None:
     return Path(selected) if selected else None
 
 
-# -------------------------------------
 # Discovery (for CLI directory input)
-# -------------------------------------
 
 def find_pdfs(path: Path, recursive: bool = False) -> list[Path]:
     """Return a sorted list of PDF files at the given path."""
@@ -107,9 +148,7 @@ def find_pdfs(path: Path, recursive: bool = False) -> list[Path]:
     raise FileNotFoundError(f"Path does not exist: {path}")
 
 
-# ---------------------------
 # Core conversion
-# ---------------------------
 
 def convert_pdf_to_jpg(
     pdf_path: Path,
@@ -217,9 +256,42 @@ def convert_pdf_to_jpg(
             doc.close()
 
 
-# -------------------------------
+def convert_pdf_to_docx(
+    pdf_path: Path,
+    output_dir: Path,
+    password: str | None = None,
+    page_range: tuple[int, int] | None = None,
+) -> Path:
+    """Convert a single PDF to a DOCX document."""
+    if not _HAS_PDF2DOCX:
+        raise PDFConversionError(
+            "pdf2docx is not installed. Run: pip install pdf2docx"
+        )
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+    from pdf2docx import Converter  # type: ignore[import]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / f"{pdf_path.stem}.docx"
+
+    start = (page_range[0] - 1) if page_range else 0
+    end = page_range[1] if page_range else None
+
+    logger.info("Converting '%s' to DOCX ...", pdf_path.name)
+    try:
+        cv = Converter(str(pdf_path), password=password or "")
+        cv.convert(str(out_path), start=start, end=end)
+        cv.close()
+    except Exception as exc:
+        raise PDFConversionError(f"Could not convert '{pdf_path.name}': {exc}") from exc
+
+    logger.info("  DOCX written to %s", out_path)
+    return out_path
+
+
+
 # CLI
-# -------------------------------
 
 def parse_page_range(value: str) -> tuple[int, int]:
     """Parse '1-5' or '3' into (start, end)."""
@@ -242,16 +314,17 @@ def parse_page_range(value: str) -> tuple[int, int]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Convert PDF files to JPG images (one image per page). "
+        description="Convert PDF files to JPG images or a DOCX document. "
                     "Run with no input argument to open a file-picker dialog.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python pdf_to_jpg.py                         # file picker\n"
-            "  python pdf_to_jpg.py document.pdf\n"
-            "  python pdf_to_jpg.py document.pdf -o out/ -d 300 -q 95\n"
-            "  python pdf_to_jpg.py document.pdf --pages 1-5\n"
-            "  python pdf_to_jpg.py pdfs/ --recursive\n"
+            "  python PDFtoJPG.py                              # file + format picker\n"
+            "  python PDFtoJPG.py document.pdf                 # converts to JPG (default)\n"
+            "  python PDFtoJPG.py document.pdf --format docx\n"
+            "  python PDFtoJPG.py document.pdf -o out/ -d 300 -q 95\n"
+            "  python PDFtoJPG.py document.pdf --pages 1-5\n"
+            "  python PDFtoJPG.py pdfs/ --recursive\n"
         ),
     )
     p.add_argument("input", type=Path, nargs="?", default=None,
@@ -272,6 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Disable the GUI file-picker fallback.")
     p.add_argument("--pick-output", action="store_true",
                    help="Also open a folder-picker for the output directory.")
+    p.add_argument("-f", "--format", choices=["jpg", "docx"], default=None,
+                   help="Output format: 'jpg' (default) or 'docx'. "
+                        "Omit to show a format-picker dialog when in GUI mode.")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     return p
 
@@ -313,6 +389,18 @@ def main(argv: list[str] | None = None) -> int:
         _pause_if_interactive(picker_mode)
         return 1
 
+    # Determine conversion format
+    fmt: str | None = args.format
+    if fmt is None:
+        if picker_mode:
+            fmt = pick_conversion_format()
+            if fmt is None:
+                logger.info("No format selected. Exiting.")
+                _pause_if_interactive(picker_mode)
+                return 0
+        else:
+            fmt = "jpg"  # CLI default
+
     # Resolve the output directory
     picked_output: Path | None = args.output
     if picked_output is None and args.pick_output:
@@ -323,20 +411,31 @@ def main(argv: list[str] | None = None) -> int:
     for pdf_path in pdfs:
         if picked_output is not None:
             out_dir = picked_output.expanduser().resolve()
-            if len(pdfs) > 1:
+            if fmt == "jpg" and len(pdfs) > 1:
                 out_dir = out_dir / pdf_path.stem
         else:
-            out_dir = pdf_path.parent / f"{pdf_path.stem}_images"
+            if fmt == "jpg":
+                out_dir = pdf_path.parent / f"{pdf_path.stem}_images"
+            else:
+                out_dir = pdf_path.parent
 
         try:
-            convert_pdf_to_jpg(
-                pdf_path=pdf_path,
-                output_dir=out_dir,
-                dpi=args.dpi,
-                quality=args.quality,
-                password=args.password,
-                page_range=args.pages,
-            )
+            if fmt == "jpg":
+                convert_pdf_to_jpg(
+                    pdf_path=pdf_path,
+                    output_dir=out_dir,
+                    dpi=args.dpi,
+                    quality=args.quality,
+                    password=args.password,
+                    page_range=args.pages,
+                )
+            else:
+                convert_pdf_to_docx(
+                    pdf_path=pdf_path,
+                    output_dir=out_dir,
+                    password=args.password,
+                    page_range=args.pages,
+                )
             success += 1
         except (PDFConversionError, FileNotFoundError, ValueError) as exc:
             logger.error("Failed: %s", exc)
